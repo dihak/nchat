@@ -1,6 +1,13 @@
 nchat
 =====
 
+Dihak fork of [d99kris/nchat](https://github.com/d99kris/nchat). Extra on `main`:
+
+- WhatsApp `JPEGThumbnail` on image/video/gif send (mobile small preview)
+- `newsletter=0` hides `*@newsletter` channels; `status_broadcast=0` hides Status Updates
+
+Install this fork: `NCHAT_REPO=dihak/nchat curl -fsSL https://raw.githubusercontent.com/dihak/nchat/main/utils/install.sh | bash`
+
 | **Linux** | **Mac** |
 |-----------|---------|
 | [![Linux](https://github.com/d99kris/nchat/workflows/Linux/badge.svg)](https://github.com/d99kris/nchat/actions?query=workflow%3ALinux) | [![macOS](https://github.com/d99kris/nchat/workflows/macOS/badge.svg)](https://github.com/d99kris/nchat/actions?query=workflow%3AmacOS) |
