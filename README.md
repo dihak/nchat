@@ -1,6 +1,13 @@
 nchat
 =====
 
+Dihak fork of [d99kris/nchat](https://github.com/d99kris/nchat). Extra on `main`:
+
+- WhatsApp `JPEGThumbnail` on image/video/gif send (mobile small preview)
+- `newsletter=0` hides `*@newsletter` channels; `status_broadcast=0` hides Status Updates
+
+Install this fork: `NCHAT_REPO=dihak/nchat curl -fsSL https://raw.githubusercontent.com/dihak/nchat/main/utils/install.sh | bash`
+
 | **Linux** | **Mac** |
 |-----------|---------|
 | [![Linux](https://github.com/d99kris/nchat/workflows/Linux/badge.svg)](https://github.com/d99kris/nchat/actions?query=workflow%3ALinux) | [![macOS](https://github.com/d99kris/nchat/workflows/macOS/badge.svg)](https://github.com/d99kris/nchat/actions?query=workflow%3AmacOS) |
@@ -508,6 +515,7 @@ This configuration file holds general user interface settings. Default content:
     muted_indicate_unread=1
     muted_notify_unread=0
     muted_position_by_timestamp=1
+    newsletter=1
     notify_every_unread=1
     online_status_share=1
     online_status_dynamic=1
@@ -836,6 +844,13 @@ Specifies whether to display reactions.
 Specifies a custom command to use for spell checking composed messages. If not
 specified, nchat checks if `aspell` or `ispell` is available on the system (in
 that order), and uses the first found.
+
+### newsletter
+
+Specifies (WhatsApp) Channels / `*@newsletter` chat level of visibility:
+
+    0 = hidden
+    1 = visible  <- default
 
 ### status_broadcast
 
