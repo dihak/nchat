@@ -655,7 +655,7 @@ install(FILES src/nchat.1 DESTINATION "${CMAKE_INSTALL_MANDIR}/man1")
 install(PROGRAMS
   utils/nchat-ctl
   utils/nchat_mcp.py
-  utils/nchat-compose-grok
+  utils/nchat-compose
   DESTINATION bin)
 
 # Uninstall

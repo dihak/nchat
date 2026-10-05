@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+# nchat-compose — config-driven auto-compose for nchat
+#
+# Copyright (c) 2026 Kristofer Berggren
+# All rights reserved.
+#
+# nchat is distributed under the MIT license, see LICENSE for details.
+
+"""Suggest next reply using a key=value compose.conf (API details not hardcoded)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+
+REQUIRED_KEYS = ("base_url", "api_backend", "model", "api_key_env")
+DEFAULT_TIMEOUT = 60
+
+
+def fail(msg: str, code: int = 1) -> None:
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def load_config(path: str) -> dict[str, str]:
+    cfg: dict[str, str] = {}
+    try:
+        text = Path(path).expanduser().read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"Error: cannot read compose config '{path}': {exc}")
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            fail(f"Error: invalid config line (expected key=value): {raw!r}")
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip()
+        if not key:
+            fail(f"Error: empty key in config line: {raw!r}")
+        cfg[key] = val
+    missing = [k for k in REQUIRED_KEYS if not cfg.get(k)]
+    if missing:
+        fail(f"Error: compose config missing required key(s): {', '.join(missing)}")
+    return cfg
+
+
+def resolve_api_key(api_key_env: str) -> str:
+    names = [n.strip() for n in api_key_env.split(",") if n.strip()]
+    if not names:
+        fail("Error: api_key_env is empty")
+    for name in names:
+        val = os.environ.get(name)
+        if val:
+            return val
+    fail(
+        "Error: none of the api_key_env variables are set: "
+        + ", ".join(names)
+    )
+    return ""  # unreachable
+
+
+def read_chat_file(path: str) -> list[str]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return [line.rstrip("\n") for line in f]
+    except FileNotFoundError:
+        fail(f"Error: File '{path}' not found.")
+    return []
+
+
+def parse_chat(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    if not lines or ":" not in lines[-1]:
+        fail("Error: Last line must be 'YourName:'")
+
+    last_sender, last_rest = lines[-1].split(":", 1)
+    if last_rest.strip():
+        fail("Error: Last line must end with a colon and no message (e.g., 'Stanley:')")
+    your_name = last_sender.strip()
+    if not your_name:
+        fail("Error: Empty name on last line.")
+
+    messages: list[dict[str, str]] = []
+    for ln in lines[:-1]:
+        if not ln.strip() or ":" not in ln:
+            continue
+        sender, content = ln.split(":", 1)
+        sender = sender.strip()
+        content = content.lstrip()
+        role = "assistant" if sender == your_name else "user"
+        messages.append({"role": role, "content": f"{sender}: {content}"})
+
+    if not messages:
+        fail("Error: No valid 'Name: message' lines before the final 'YourName:' marker.")
+
+    return your_name, messages
+
+
+def build_system_prompt(your_name: str) -> str:
+    return f"You are {your_name} in a chat. Suggest {your_name}'s next reply."
+
+
+def build_chat_completions_messages(
+    your_name: str, chat_messages: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    prompt = f"Suggest {your_name}'s next reply."
+    return (
+        [{"role": "system", "content": build_system_prompt(your_name)}]
+        + chat_messages
+        + [{"role": "user", "content": prompt}]
+    )
+
+
+def build_responses_input(
+    your_name: str, chat_messages: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    # Responses API uses input items; map chat roles to input messages.
+    items: list[dict[str, str]] = [
+        {"role": "system", "content": build_system_prompt(your_name)}
+    ]
+    for msg in chat_messages:
+        items.append({"role": msg["role"], "content": msg["content"]})
+    items.append({"role": "user", "content": f"Suggest {your_name}'s next reply."})
+    return items
+
+
+def http_json(url: str, payload: dict[str, Any], api_key: str, timeout: int) -> dict[str, Any]:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+            return json.loads(body)
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8")
+            err_json = json.loads(err_body)
+            msg = (
+                err_json.get("error", {}).get("message")
+                if isinstance(err_json.get("error"), dict)
+                else None
+            ) or err_body or f"{e.code} {e.reason}"
+        except Exception:
+            msg = f"{e.code} {e.reason}"
+        fail(f"HTTP Error: {msg}")
+    except urllib.error.URLError as e:
+        fail(f"URL Error: {e.reason}")
+    except json.JSONDecodeError:
+        fail("Error: Response was not valid JSON.")
+    return {}
+
+
+def extract_chat_completions(result: dict[str, Any]) -> str:
+    try:
+        return result["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        fail("Error: Unexpected chat_completions response structure.")
+    return ""
+
+
+def extract_responses(result: dict[str, Any]) -> str:
+    if isinstance(result.get("output_text"), str) and result["output_text"]:
+        return result["output_text"]
+    output = result.get("output")
+    if isinstance(output, list):
+        parts: list[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "output_text" and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+        if parts:
+            return "".join(parts)
+    fail("Error: Unexpected responses API structure.")
+    return ""
+
+
+def strip_name_prefix(reply: str) -> str:
+    return reply.split(":", 1)[1].strip() if ":" in reply else reply
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="nchat auto-compose via external API (settings from compose.conf)."
+    )
+    parser.add_argument(
+        "-c",
+        "--chat-completion",
+        required=True,
+        help="Path to input chat file. Last line must be 'YourName:'.",
+    )
+    parser.add_argument(
+        "-f",
+        "--config",
+        default=None,
+        help="Path to compose.conf (key=value). Else NCHAT_COMPOSE_CONFIG.",
+    )
+    args = parser.parse_args()
+
+    conf_path = args.config or os.environ.get("NCHAT_COMPOSE_CONFIG")
+    if not conf_path:
+        fail("Error: provide -f PATH or set NCHAT_COMPOSE_CONFIG")
+
+    cfg = load_config(conf_path)
+    backend = cfg["api_backend"].strip().lower()
+    base_url = cfg["base_url"].rstrip("/")
+    model = cfg["model"]
+    try:
+        timeout = int(cfg.get("timeout") or DEFAULT_TIMEOUT)
+    except ValueError:
+        fail("Error: timeout must be an integer number of seconds")
+    if timeout <= 0:
+        fail("Error: timeout must be > 0 seconds")
+
+    api_key = resolve_api_key(cfg["api_key_env"])
+    lines = read_chat_file(args.chat_completion)
+    your_name, chat_messages = parse_chat(lines)
+
+    if backend == "chat_completions":
+        url = f"{base_url}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": build_chat_completions_messages(your_name, chat_messages),
+        }
+        result = http_json(url, payload, api_key, timeout)
+        reply = extract_chat_completions(result)
+    elif backend == "responses":
+        url = f"{base_url}/responses"
+        payload = {
+            "model": model,
+            "input": build_responses_input(your_name, chat_messages),
+        }
+        result = http_json(url, payload, api_key, timeout)
+        reply = extract_responses(result)
+    else:
+        fail(
+            "Error: unknown api_backend "
+            f"'{cfg['api_backend']}' (expected 'responses' or 'chat_completions')"
+        )
+
+    print(strip_name_prefix(reply))
+
+
+if __name__ == "__main__":
+    main()

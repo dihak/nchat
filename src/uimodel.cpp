@@ -5858,6 +5858,47 @@ namespace
     return result;
   }
 
+  static int AgentHexValue(char p_Ch)
+  {
+    if ((p_Ch >= '0') && (p_Ch <= '9')) return p_Ch - '0';
+    if ((p_Ch >= 'a') && (p_Ch <= 'f')) return 10 + (p_Ch - 'a');
+    if ((p_Ch >= 'A') && (p_Ch <= 'F')) return 10 + (p_Ch - 'A');
+    return -1;
+  }
+
+  static bool AgentAppendUtf8(std::string& p_Out, unsigned int p_Code)
+  {
+    if (p_Code <= 0x7F)
+    {
+      p_Out += static_cast<char>(p_Code);
+      return true;
+    }
+    if (p_Code <= 0x7FF)
+    {
+      p_Out += static_cast<char>(0xC0 | ((p_Code >> 6) & 0x1F));
+      p_Out += static_cast<char>(0x80 | (p_Code & 0x3F));
+      return true;
+    }
+    if (p_Code <= 0xFFFF)
+    {
+      // Skip UTF-16 surrogate halves; treat as invalid.
+      if ((p_Code >= 0xD800) && (p_Code <= 0xDFFF)) return false;
+      p_Out += static_cast<char>(0xE0 | ((p_Code >> 12) & 0x0F));
+      p_Out += static_cast<char>(0x80 | ((p_Code >> 6) & 0x3F));
+      p_Out += static_cast<char>(0x80 | (p_Code & 0x3F));
+      return true;
+    }
+    if (p_Code <= 0x10FFFF)
+    {
+      p_Out += static_cast<char>(0xF0 | ((p_Code >> 18) & 0x07));
+      p_Out += static_cast<char>(0x80 | ((p_Code >> 12) & 0x3F));
+      p_Out += static_cast<char>(0x80 | ((p_Code >> 6) & 0x3F));
+      p_Out += static_cast<char>(0x80 | (p_Code & 0x3F));
+      return true;
+    }
+    return false;
+  }
+
   std::string AgentJsonUnescape(const std::string& p_Str)
   {
     std::string result;
@@ -5870,19 +5911,33 @@ namespace
         {
           case '"': result += '"'; ++i; break;
           case '\\': result += '\\'; ++i; break;
+          case '/': result += '/'; ++i; break;
+          case 'b': result += '\b'; ++i; break;
+          case 'f': result += '\f'; ++i; break;
           case 'n': result += '\n'; ++i; break;
           case 'r': result += '\r'; ++i; break;
           case 't': result += '\t'; ++i; break;
           case 'u':
             if ((i + 5) < p_Str.size())
             {
-              // Minimal \\u00XX support for control chars we emit.
-              result += p_Str[i];
+              const int h0 = AgentHexValue(p_Str[i + 2]);
+              const int h1 = AgentHexValue(p_Str[i + 3]);
+              const int h2 = AgentHexValue(p_Str[i + 4]);
+              const int h3 = AgentHexValue(p_Str[i + 5]);
+              if ((h0 >= 0) && (h1 >= 0) && (h2 >= 0) && (h3 >= 0))
+              {
+                const unsigned int code = (static_cast<unsigned int>(h0) << 12) |
+                                          (static_cast<unsigned int>(h1) << 8) |
+                                          (static_cast<unsigned int>(h2) << 4) |
+                                          static_cast<unsigned int>(h3);
+                if (AgentAppendUtf8(result, code))
+                {
+                  i += 5; // consume uXXXX (loop also advances once)
+                  break;
+                }
+              }
             }
-            else
-            {
-              result += p_Str[i];
-            }
+            result += p_Str[i];
             break;
           default: result += p_Str[i]; break;
         }
@@ -6140,9 +6195,13 @@ std::string UiModel::Impl::AgentHistory(const std::string& p_ChatId, int p_Limit
     SendProtocolRequest(profileId, getMessagesRequest);
 
     // Wait for protocol/cache fill without holding the model mutex (MessageHandler needs it).
+    // Cap wait: ~30s max, but if the cache stays empty for ~1s after the request, return empty
+    // history instead of freezing the UI thread for the full timeout.
     const int maxIters = 30 * 20; // ~30s at 50ms
+    const int emptyGiveUpIters = 20; // ~1s with size still 0
     int lastSize = static_cast<int>(m_MessageVec[profileId][p_ChatId].size());
     int stable = 0;
+    int emptyStable = 0;
     for (int i = 0; i < maxIters; ++i)
     {
       if (static_cast<int>(m_MessageVec[profileId][p_ChatId].size()) >= p_Limit) break;
@@ -6150,9 +6209,15 @@ std::string UiModel::Impl::AgentHistory(const std::string& p_ChatId, int p_Limit
       TimeUtil::Sleep(0.050);
       p_Lock.lock();
       const int size = static_cast<int>(m_MessageVec[profileId][p_ChatId].size());
+      if (size == 0)
+      {
+        if (++emptyStable >= emptyGiveUpIters) break;
+        continue;
+      }
+      emptyStable = 0;
       if (size == lastSize)
       {
-        if ((size > 0) && (++stable > 10)) break; // ~0.5s with no growth after some data
+        if (++stable > 10) break; // ~0.5s with no growth after some data
       }
       else
       {

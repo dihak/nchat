@@ -72,14 +72,37 @@ Example usage with custom prompt and max token limit of 100:
 
     auto_compose_command=python3 ~/.local/bin/compose -p "Suggest {your_name}'s next reply in a joking manner." -M 100 -c '%1'
 
-Example usage with xAI Grok (`utils/nchat-compose-grok`, requires `XAI_API_KEY`):
 
-    auto_compose_command=python3 ~/.local/bin/nchat-compose-grok -c '%1'
+Config-file compose (`utils/nchat-compose`)
+------------------------------------------
+`nchat-compose` does not hardcode an API host, model, or key. It reads a separate
+key=value `compose.conf` (not `ui.conf`):
 
-Optional model override (default `grok-4`) and 60s timeout built-in:
+    base_url=https://api.example.com/v1
+    api_backend=responses
+    model=demo-model
+    api_key_env=MY_API_KEY,FALLBACK_API_KEY
+    timeout=60
 
-    auto_compose_command=python3 ~/.local/bin/nchat-compose-grok -m grok-4 -c '%1'
+Required keys:
 
-If `XAI_API_KEY` is unset, `nchat-compose-grok` exits non-zero with a message on
-stderr and prints nothing on stdout (so the TUI does not insert junk).
+- `base_url` — origin only, no path suffix (example: `https://api.example.com/v1`)
+- `api_backend` — `responses` or `chat_completions`
+- `model` — model id sent to the API
+- `api_key_env` — comma-separated **names** of environment variables; the first
+  non-empty value is used as the Bearer token (do not put the key in the file)
+
+Optional: `timeout` seconds (default 60).
+
+Backends:
+
+- `responses` → `POST {base_url}/responses` with `{"model","input"}`
+- `chat_completions` → `POST {base_url}/chat/completions` with `messages`
+
+Config path: `-f PATH`, or env `NCHAT_COMPOSE_CONFIG`.
+
+    auto_compose_command=python3 ~/.local/bin/nchat-compose -f /path/to/compose.conf -c '%1'
+
+If the config or API key is missing, or the request fails, the script exits
+non-zero with a message on stderr and prints nothing on stdout.
 

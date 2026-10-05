@@ -83,7 +83,7 @@ nchat-ctl --confdir DIR send-file --chat ID --path FILE
 - Exit `2` if the socket is missing / not connectable (TUI not running for that
   confdir). Does not start nchat and does not fall back to a second process.
 
-## MCP server (Grok)
+## MCP server
 
 `nchat_mcp.py` is a stdlib-only MCP stdio server that shells out to `nchat-ctl`
 (override path with `NCHAT_CTL`).
@@ -100,7 +100,7 @@ Confdir map:
 - telegram → `$NCHAT_TELEGRAM_DIR` or `~/.config/nchat-telegram`
 - whatsapp → `$NCHAT_WHATSAPP_DIR` or `~/.config/nchat-whatsapp`
 
-Grok `config.toml` snippet (after install to `~/.local/bin`):
+Example MCP client config snippet (after install to `~/.local/bin`):
 
 ```toml
 [mcp_servers.nchat]

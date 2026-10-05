@@ -53,6 +53,69 @@ def classify(line: str) -> dict:
     return {"id": id_val, "ok": True, "method": method}
 
 
+def agent_json_unescape(s: str) -> str:
+    """Mirror of C++ AgentJsonUnescape (\\uXXXX -> UTF-8)."""
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            esc = s[i + 1]
+            if esc == '"':
+                out.append('"')
+                i += 2
+            elif esc == "\\":
+                out.append("\\")
+                i += 2
+            elif esc == "/":
+                out.append("/")
+                i += 2
+            elif esc == "b":
+                out.append("\b")
+                i += 2
+            elif esc == "f":
+                out.append("\f")
+                i += 2
+            elif esc == "n":
+                out.append("\n")
+                i += 2
+            elif esc == "r":
+                out.append("\r")
+                i += 2
+            elif esc == "t":
+                out.append("\t")
+                i += 2
+            elif esc == "u" and i + 5 < len(s):
+                hexpart = s[i + 2 : i + 6]
+                try:
+                    code = int(hexpart, 16)
+                    if 0xD800 <= code <= 0xDFFF:
+                        out.append(s[i])
+                        i += 1
+                    else:
+                        out.append(chr(code))
+                        i += 6
+                except ValueError:
+                    out.append(s[i])
+                    i += 1
+            else:
+                out.append(s[i])
+                i += 1
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
+def test_unicode_unescape() -> None:
+    assert agent_json_unescape("hello") == "hello"
+    assert agent_json_unescape(r"a\nb") == "a\nb"
+    assert agent_json_unescape(r"say \"hi\"") == 'say "hi"'
+    assert agent_json_unescape(r"\u0041") == "A"
+    assert agent_json_unescape(r"\u00e9") == "é"
+    assert agent_json_unescape(r"\u4e2d") == "中"
+    assert agent_json_unescape(r"x\u0020y") == "x y"
+
+
 def main() -> int:
     cases = [
         ("not json", False, "malformed"),
@@ -75,6 +138,12 @@ def main() -> int:
             failed += 1
             continue
         print(f"ok: {line[:40]!r} -> ok={resp['ok']}")
+    try:
+        test_unicode_unescape()
+        print("ok: unicode unescape")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: unicode unescape: {exc}", file=sys.stderr)
+        failed += 1
     if failed:
         return 1
     print("ALL PASSED")
