@@ -15,12 +15,14 @@
 
 #include "apputil.h"
 #include "emojilist.h"
+#include "fileutil.h"
 #include "log.h"
 #include "messagecache.h"
 #include "timeutil.h"
 #include "uicolorconfig.h"
 #include "uiconfig.h"
 #include "uicontroller.h"
+#include "uicontrolsocket.h"
 #include "uikeyconfig.h"
 #include "uikeydump.h"
 #include "uimodel.h"
@@ -31,10 +33,16 @@ Ui::Ui()
 
   m_Controller = std::make_shared<UiController>();
   m_Model = std::make_shared<UiModel>();
+  m_ControlSocket = std::make_shared<UiControlSocket>();
 }
 
 Ui::~Ui()
 {
+  if (m_ControlSocket)
+  {
+    m_ControlSocket->Stop();
+  }
+  m_ControlSocket.reset();
   m_Model.reset();
   m_Controller.reset();
 
@@ -68,6 +76,10 @@ void Ui::Init()
 
 void Ui::Cleanup()
 {
+  if (m_ControlSocket)
+  {
+    m_ControlSocket->Stop();
+  }
   m_Controller->Cleanup();
   m_Model->Cleanup();
   UiColorConfig::Cleanup();
@@ -97,17 +109,31 @@ void Ui::Run()
     MessageCache::FetchContacts(protocol.first);
   }
 
+  // Agent control socket (confdir/control.sock) while TUI is up.
+  m_ControlSocket->Start(FileUtil::GetApplicationDir(), m_Model);
+
   LOG_INFO("ui loop start");
 
   raw();
   curs_set(1);
   while (m_Model->Process() && !AppUtil::IsTerminateRequested())
   {
-    wint_t key = UiController::GetKey(50);
+    const int wakeFd = m_ControlSocket ? m_ControlSocket->GetWakeFd() : -1;
+    bool woke = false;
+    wint_t key = UiController::GetKey(50, wakeFd, &woke);
+    if (woke && m_ControlSocket)
+    {
+      m_ControlSocket->ProcessOnUiThread();
+    }
     if (key != 0)
     {
       m_Model->KeyHandler(key);
     }
+  }
+
+  if (m_ControlSocket)
+  {
+    m_ControlSocket->Stop();
   }
 
   if (AppUtil::IsTerminateRequested())
