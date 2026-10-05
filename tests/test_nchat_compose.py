@@ -45,6 +45,36 @@ def write_conf(td: Path, text: str) -> Path:
     return p
 
 
+def load_compose():
+    from importlib.machinery import SourceFileLoader
+
+    return SourceFileLoader("nchat_compose", str(COMPOSE)).load_module()
+
+
+def test_ask_and_draft_headers():
+    mod = load_compose()
+    lines = [
+        "#nchat ask translate to english",
+        "#nchat draft mau meeting jam 3",
+        "You:",
+    ]
+    ask, draft, chat = mod.split_compose_file(lines)
+    assert ask == "translate to english"
+    assert draft == "mau meeting jam 3"
+    name, messages = mod.parse_chat(chat)
+    assert name == "You"
+    assert messages == []
+    instruction = mod.build_instruction(name, ask, draft)
+    assert "translate to english" in instruction
+    assert "mau meeting jam 3" in instruction
+
+
+def test_empty_ask_suggests_reply():
+    mod = load_compose()
+    text = mod.build_instruction("Ada", "", "")
+    assert "next reply" in text
+
+
 def test_missing_config():
     r = run_compose(["-c", str(HISTORY)], env={})
     assert r.returncode != 0
@@ -139,6 +169,8 @@ def main() -> int:
         print(f"FAIL: missing {COMPOSE}", file=sys.stderr)
         return 1
     tests = [
+        test_ask_and_draft_headers,
+        test_empty_ask_suggests_reply,
         test_missing_config,
         test_missing_required_keys,
         test_missing_api_key,

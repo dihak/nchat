@@ -42,6 +42,7 @@ public:
   int GetHistoryShowCount();
   int GetHistoryLines();
   int GetEntryWidth();
+  int GetEntryHeight();
   int GetScreenWidth();
   int GetScreenHeight();
   void DecreaseListWidth();

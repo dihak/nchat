@@ -110,3 +110,11 @@ While the command runs, the status bar shows `composing...`. Press the
 auto-compose key again, or the cancel key, to abort it. The draft is written
 into the input box only after the command exits successfully.
 
+The entry area has a second line, `ask:`. Down from the end of the message
+moves the cursor there. Up moves it back. Enter sends only the message line.
+
+Ctrl-x sends the ask line, the current draft, and the recent chat. An empty
+ask line and an empty draft asks for the next reply. Any other ask text is
+the instruction (translate, fix grammar, shorten, and so on). The ask line
+is cleared when a result is applied.
+

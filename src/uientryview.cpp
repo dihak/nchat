@@ -33,8 +33,11 @@ void UiEntryView::Draw()
 
   curs_set(0);
 
+  const bool showAsk = (m_H > 1);
+  const int messageH = showAsk ? (m_H - 1) : m_H;
   std::wstring input = m_Model->GetEntryStrLocked();
   const int inputPos = m_Model->GetEntryPosLocked();
+  const bool askFocus = showAsk && m_Model->GetAskFocusLocked();
   std::wstring line;
   std::vector<std::wstring> lines;
   int cx = 0;
@@ -48,9 +51,9 @@ void UiEntryView::Draw()
   wbkgd(m_Win, attribute | colorPair | ' ');
   wattron(m_Win, attribute | colorPair);
 
-  int yoffs = (cy < (m_H - 1)) ? 0 : (cy - (m_H - 1));
+  int yoffs = (cy < (messageH - 1)) ? 0 : (cy - (messageH - 1));
 
-  for (int i = 0; i < m_H; ++i)
+  for (int i = 0; i < messageH; ++i)
   {
     if ((i + yoffs) < (int)lines.size())
     {
@@ -60,10 +63,35 @@ void UiEntryView::Draw()
     }
   }
 
+  if (showAsk)
+  {
+    const std::wstring prefix = L"ask: ";
+    std::wstring ask = m_Model->GetAskStrLocked();
+    const int askPos = m_Model->GetAskPosLocked();
+    const int avail = std::max(1, m_W - (int)prefix.size());
+    int offset = 0;
+    if (askPos >= avail)
+    {
+      offset = askPos - avail + 1;
+    }
+    std::wstring shown = ask.substr(std::min(offset, (int)ask.size()));
+    if ((int)shown.size() > avail)
+    {
+      shown = shown.substr(0, avail);
+    }
+    mvwaddwstr(m_Win, m_H - 1, 0, (prefix + shown).c_str());
+    if (askFocus)
+    {
+      cx = (int)prefix.size() + askPos - offset;
+      cy = m_H - 1;
+      yoffs = 0;
+    }
+  }
+
   wattroff(m_Win, attribute | colorPair);
 
   m_CursX = cx;
-  m_CursY = (cy - yoffs);
+  m_CursY = askFocus ? cy : (cy - yoffs);
 
   wmove(m_Win, m_CursY, m_CursX);
   wrefresh(m_Win);

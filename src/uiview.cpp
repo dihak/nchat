@@ -205,6 +205,11 @@ int UiView::GetHistoryLines()
   return m_UiHistoryView->H();
 }
 
+int UiView::GetEntryHeight()
+{
+  return m_EntryHeight;
+}
+
 int UiView::GetEntryWidth()
 {
   return m_UiEntryView->W();

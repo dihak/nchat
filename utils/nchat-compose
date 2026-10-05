@@ -77,6 +77,23 @@ def read_chat_file(path: str) -> list[str]:
     return []
 
 
+def split_compose_file(lines: list[str]) -> tuple[str, str, list[str]]:
+    """Pull optional #nchat ask/draft headers off the chat transcript."""
+    ask_parts: list[str] = []
+    draft_parts: list[str] = []
+    chat: list[str] = []
+    for ln in lines:
+        if ln.startswith("#nchat ask "):
+            ask_parts.append(ln[len("#nchat ask ") :])
+        elif ln.startswith("#nchat draft "):
+            draft_parts.append(ln[len("#nchat draft ") :])
+        else:
+            chat.append(ln)
+    ask = "\n".join(ask_parts).replace("\\n", "\n").strip()
+    draft = "\n".join(draft_parts).replace("\\n", "\n").strip()
+    return ask, draft, chat
+
+
 def parse_chat(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
     while lines and not lines[-1].strip():
         lines.pop()
@@ -101,20 +118,40 @@ def parse_chat(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
         role = "assistant" if sender == your_name else "user"
         messages.append({"role": role, "content": f"{sender}: {content}"})
 
-    if not messages:
-        fail("Error: No valid 'Name: message' lines before the final 'YourName:' marker.")
-
     return your_name, messages
 
 
+def build_instruction(your_name: str, ask: str, draft: str) -> str:
+    if ask:
+        text = (
+            "Follow this instruction. Return only the message text to put in the "
+            f"input box, with no quotes or explanation.\nInstruction: {ask}"
+        )
+    elif draft:
+        text = (
+            f"Rewrite {your_name}'s draft as the next chat message. "
+            "Return only the message text."
+        )
+    else:
+        text = f"Suggest {your_name}'s next reply. Return only the message text."
+    if draft:
+        text += f"\nDraft:\n{draft}"
+    return text
+
+
 def build_system_prompt(your_name: str) -> str:
-    return f"You are {your_name} in a chat. Suggest {your_name}'s next reply."
+    return (
+        f"You are {your_name} in a chat. Return only the message text for the input box."
+    )
 
 
 def build_chat_completions_messages(
-    your_name: str, chat_messages: list[dict[str, str]]
+    your_name: str,
+    chat_messages: list[dict[str, str]],
+    ask: str = "",
+    draft: str = "",
 ) -> list[dict[str, str]]:
-    prompt = f"Suggest {your_name}'s next reply."
+    prompt = build_instruction(your_name, ask, draft)
     return (
         [{"role": "system", "content": build_system_prompt(your_name)}]
         + chat_messages
@@ -123,7 +160,10 @@ def build_chat_completions_messages(
 
 
 def build_responses_input(
-    your_name: str, chat_messages: list[dict[str, str]]
+    your_name: str,
+    chat_messages: list[dict[str, str]],
+    ask: str = "",
+    draft: str = "",
 ) -> list[dict[str, str]]:
     # Responses API uses input items; map chat roles to input messages.
     items: list[dict[str, str]] = [
@@ -131,7 +171,9 @@ def build_responses_input(
     ]
     for msg in chat_messages:
         items.append({"role": msg["role"], "content": msg["content"]})
-    items.append({"role": "user", "content": f"Suggest {your_name}'s next reply."})
+    items.append(
+        {"role": "user", "content": build_instruction(your_name, ask, draft)}
+    )
     return items
 
 
@@ -241,13 +283,18 @@ def main() -> None:
 
     api_key = resolve_api_key(cfg["api_key_env"])
     lines = read_chat_file(args.chat_completion)
-    your_name, chat_messages = parse_chat(lines)
+    ask, draft, chat_lines = split_compose_file(lines)
+    your_name, chat_messages = parse_chat(chat_lines)
+    if not chat_messages and not ask and not draft:
+        fail("Error: No chat history, ask line, or draft to send.")
 
     if backend == "chat_completions":
         url = f"{base_url}/chat/completions"
         payload = {
             "model": model,
-            "messages": build_chat_completions_messages(your_name, chat_messages),
+            "messages": build_chat_completions_messages(
+                your_name, chat_messages, ask, draft
+            ),
         }
         result = http_json(url, payload, api_key, timeout)
         reply = extract_chat_completions(result)
@@ -255,7 +302,7 @@ def main() -> None:
         url = f"{base_url}/responses"
         payload = {
             "model": model,
-            "input": build_responses_input(your_name, chat_messages),
+            "input": build_responses_input(your_name, chat_messages, ask, draft),
         }
         result = http_json(url, payload, api_key, timeout)
         reply = extract_responses(result)

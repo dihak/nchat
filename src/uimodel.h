@@ -110,6 +110,9 @@ private:
 
     std::wstring& GetEntryStr();
     int& GetEntryPos();
+    std::wstring& GetAskStr();
+    int& GetAskPos();
+    bool GetAskFocus();
 
     std::vector<std::pair<std::string, std::string>>& GetChatVec();
     std::vector<std::pair<std::string, std::string>>& GetChatVecLock();
@@ -287,6 +290,9 @@ private:
 
     std::unordered_map<std::string, std::unordered_map<std::string, std::wstring>> m_EntryStr;
     std::unordered_map<std::string, std::unordered_map<std::string, int>> m_EntryPos;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::wstring>> m_AskStr;
+    std::unordered_map<std::string, std::unordered_map<std::string, int>> m_AskPos;
+    std::unordered_map<std::string, std::unordered_map<std::string, bool>> m_AskFocus;
 
     std::unordered_map<std::string, std::unordered_map<std::string, std::wstring>> m_EntryStrCleared;
     std::unordered_map<std::string, std::unordered_map<std::string, int>> m_EntryPosCleared;
@@ -395,6 +401,9 @@ public:
   bool GetEmojiEnabledLocked();
   int GetEntryPosLocked();
   std::wstring GetEntryStrLocked();
+  int GetAskPosLocked();
+  std::wstring GetAskStrLocked();
+  bool GetAskFocusLocked();
   int GetHelpOffsetLocked();
   int64_t GetLastMessageTimeLocked(const std::string& p_ProfileId, const std::string& p_ChatId);
   bool GetListDialogActiveLocked();

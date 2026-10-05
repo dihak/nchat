@@ -260,6 +260,69 @@ void UiModel::Impl::EntryKeyHandler(wint_t p_Key)
   std::string chatId = m_CurrentChat.second;
   int& entryPos = m_EntryPos[profileId][chatId];
   std::wstring& entryStr = m_EntryStr[profileId][chatId];
+  int& askPos = m_AskPos[profileId][chatId];
+  std::wstring& askStr = m_AskStr[profileId][chatId];
+  bool& askFocus = m_AskFocus[profileId][chatId];
+
+  if (askFocus)
+  {
+    if (p_Key == keyUp)
+    {
+      askFocus = false;
+      UpdateEntry();
+      return;
+    }
+    if (p_Key == keyLeft)
+    {
+      askPos = NumUtil::Bound(0, askPos - 1, (int)askStr.size());
+    }
+    else if (p_Key == keyRight)
+    {
+      askPos = NumUtil::Bound(0, askPos + 1, (int)askStr.size());
+    }
+    else if (p_Key == keyBeginLine)
+    {
+      askPos = 0;
+    }
+    else if (p_Key == keyEndLine)
+    {
+      askPos = (int)askStr.size();
+    }
+    else if ((p_Key == keyBackspace) || (p_Key == keyBackspaceAlt))
+    {
+      if (askPos > 0)
+      {
+        askStr.erase(--askPos, 1);
+      }
+    }
+    else if (p_Key == keyDelete)
+    {
+      if (askPos < (int)askStr.size())
+      {
+        askStr.erase(askPos, 1);
+      }
+    }
+    else if ((p_Key == keyClear) || (p_Key == keyDeleteLineBeforeCursor))
+    {
+      askStr.clear();
+      askPos = 0;
+    }
+    else if (p_Key == keyDeleteLineAfterCursor)
+    {
+      askStr.erase(askPos);
+    }
+    else if (StrUtil::IsValidTextKey(p_Key))
+    {
+      askStr.insert(askPos++, 1, p_Key);
+    }
+    else
+    {
+      return;
+    }
+
+    UpdateEntry();
+    return;
+  }
 
   const int messageCount = m_Messages[profileId][chatId].size();
   int& messageOffset = m_MessageOffset[profileId][chatId];
@@ -329,7 +392,13 @@ void UiModel::Impl::EntryKeyHandler(wint_t p_Key)
     }
     else
     {
-      if (entryPos < (int)entryStr.size())
+      if ((entryPos >= (int)entryStr.size()) && (m_View->GetEntryHeight() > 1))
+      {
+        askFocus = true;
+        UpdateEntry();
+        return;
+      }
+      else if (entryPos < (int)entryStr.size())
       {
         int cx = 0;
         int cy = 0;
@@ -3139,6 +3208,21 @@ int& UiModel::Impl::GetEntryPos()
   return m_EntryPos[m_CurrentChat.first][m_CurrentChat.second];
 }
 
+std::wstring& UiModel::Impl::GetAskStr()
+{
+  return m_AskStr[m_CurrentChat.first][m_CurrentChat.second];
+}
+
+int& UiModel::Impl::GetAskPos()
+{
+  return m_AskPos[m_CurrentChat.first][m_CurrentChat.second];
+}
+
+bool UiModel::Impl::GetAskFocus()
+{
+  return m_AskFocus[m_CurrentChat.first][m_CurrentChat.second];
+}
+
 std::vector<std::pair<std::string, std::string>>& UiModel::Impl::GetChatVec()
 {
   return m_ChatVec;
@@ -3765,6 +3849,13 @@ void UiModel::Impl::OnKeyCancel()
 {
   if (CancelAutoCompose())
   {
+    return;
+  }
+
+  if (m_AskFocus[m_CurrentChat.first][m_CurrentChat.second])
+  {
+    m_AskFocus[m_CurrentChat.first][m_CurrentChat.second] = false;
+    UpdateEntry();
     return;
   }
 
@@ -4542,8 +4633,22 @@ bool UiModel::Impl::AutoCompose()
   const int editOffset = GetEditMessageActive() ? 1 : 0;
   const int offset = messageOffset + editOffset;
 
-  auto it = std::next(messageVec.begin(), offset);
-  if (it == messageVec.end())
+  std::string ask = StrUtil::ToString(m_AskStr[profileId][chatId]);
+  std::string draft = StrUtil::ToString(m_EntryStr[profileId][chatId]);
+  StrUtil::ReplaceString(ask, "\n", " ");
+  StrUtil::ReplaceString(draft, "\n", "\\n");
+
+  auto it = messageVec.begin();
+  if (offset < (int)messageVec.size())
+  {
+    it = std::next(messageVec.begin(), offset);
+  }
+  else
+  {
+    it = messageVec.end();
+  }
+
+  if ((it == messageVec.end()) && ask.empty() && draft.empty())
   {
     LOG_WARNING("end of message history");
     return false;
@@ -4582,7 +4687,7 @@ bool UiModel::Impl::AutoCompose()
     historyStr = line + historyStr;
   }
 
-  if (historyStr.empty())
+  if (historyStr.empty() && ask.empty() && draft.empty())
   {
     LOG_WARNING("no message history extracted");
     return false;
@@ -4591,7 +4696,16 @@ bool UiModel::Impl::AutoCompose()
   std::string selfName = GetContactNameIncludingSelf(profileId, GetSelfId(profileId));
   StrUtil::ReplaceString(selfName, ":", "");
   StrUtil::ReplaceString(selfName, "\n", " ");
-  historyStr += selfName + ":\n";
+  std::string header;
+  if (!ask.empty())
+  {
+    header += "#nchat ask " + ask + "\n";
+  }
+  if (!draft.empty())
+  {
+    header += "#nchat draft " + draft + "\n";
+  }
+  historyStr = header + historyStr + selfName + ":\n";
 
   std::string tempPath = FileUtil::GetTempDir() + "/history.txt";
   FileUtil::WriteFile(tempPath, historyStr);
@@ -4751,6 +4865,9 @@ void UiModel::Impl::PollAutoCompose()
 
   m_EntryStr[profileId][chatId] = StrUtil::ToWString(result);
   m_EntryPos[profileId][chatId] = (int)m_EntryStr[profileId][chatId].size();
+  m_AskStr[profileId][chatId].clear();
+  m_AskPos[profileId][chatId] = 0;
+  m_AskFocus[profileId][chatId] = false;
   UpdateEntry();
   UpdateStatus();
 }
@@ -5355,6 +5472,24 @@ std::wstring UiModel::GetEntryStrLocked()
 {
   nc_assert(m_ModelMutex.owns_lock());
   return GetImpl().GetEntryStr();
+}
+
+int UiModel::GetAskPosLocked()
+{
+  nc_assert(m_ModelMutex.owns_lock());
+  return GetImpl().GetAskPos();
+}
+
+std::wstring UiModel::GetAskStrLocked()
+{
+  nc_assert(m_ModelMutex.owns_lock());
+  return GetImpl().GetAskStr();
+}
+
+bool UiModel::GetAskFocusLocked()
+{
+  nc_assert(m_ModelMutex.owns_lock());
+  return GetImpl().GetAskFocus();
 }
 
 int UiModel::GetHelpOffsetLocked()
