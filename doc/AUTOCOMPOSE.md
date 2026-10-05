@@ -110,8 +110,8 @@ While the command runs, the status bar shows `composing...`. Press the
 auto-compose key again, or the cancel key, to abort it. The draft is written
 into the input box only after the command exits successfully.
 
-The entry area has a second line, `ai:`. Down from the end of the message
-moves the cursor there. Up moves it back. Enter sends only the message line.
+The entry area has a second line, `ai:`. Ctrl-] toggles the cursor between
+the message box and that line. Enter sends only the message line.
 
 Ctrl-x sends the ask line, the current draft, and the recent chat. An empty
 ask line and an empty draft asks for the next reply. Any other ask text is

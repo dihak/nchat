@@ -97,6 +97,7 @@ void UiHelpView::Draw()
     AppendHelpItem("select_mention", "Mention", helpItems);
     AppendHelpItem("spell", "ExtSpell", helpItems);
     AppendHelpItem("auto_compose", "AutoComp", helpItems);
+    AppendHelpItem("focus_ask", "Ai", helpItems);
     AppendHelpItem("decrease_list_width", "DecListW", helpItems);
     AppendHelpItem("increase_list_width", "IncListW", helpItems);
 

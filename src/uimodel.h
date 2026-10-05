@@ -40,6 +40,7 @@ private:
     void OnKeyDecreaseListWidth();
     void OnKeyIncreaseListWidth();
     void OnKeyToggleHelp();
+    void ToggleAskFocus();
     void OnKeyToggleList();
     void OnKeyToggleTop();
     void OnKeyToggleEmoji();

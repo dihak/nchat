@@ -226,6 +226,18 @@ void UiModel::Impl::SendMessage()
   SetHistoryInteraction(true);
 }
 
+void UiModel::Impl::ToggleAskFocus()
+{
+  if (!m_View || (m_View->GetEntryHeight() < 2))
+  {
+    return;
+  }
+
+  bool& askFocus = m_AskFocus[m_CurrentChat.first][m_CurrentChat.second];
+  askFocus = !askFocus;
+  UpdateEntry();
+}
+
 void UiModel::Impl::OnKeyOtherCommandsHelp()
 {
   AnyUserKeyInput();
@@ -266,12 +278,6 @@ void UiModel::Impl::EntryKeyHandler(wint_t p_Key)
 
   if (askFocus)
   {
-    if (p_Key == keyUp)
-    {
-      askFocus = false;
-      UpdateEntry();
-      return;
-    }
     if (p_Key == keyLeft)
     {
       askPos = NumUtil::Bound(0, askPos - 1, (int)askStr.size());
@@ -392,13 +398,7 @@ void UiModel::Impl::EntryKeyHandler(wint_t p_Key)
     }
     else
     {
-      if ((entryPos >= (int)entryStr.size()) && (m_View->GetEntryHeight() > 1))
-      {
-        askFocus = true;
-        UpdateEntry();
-        return;
-      }
-      else if (entryPos < (int)entryStr.size())
+      if (entryPos < (int)entryStr.size())
       {
         int cx = 0;
         int cy = 0;
@@ -4994,6 +4994,7 @@ void UiModel::KeyHandler(wint_t p_Key)
   static wint_t keyTerminalResize = UiKeyConfig::GetKey("terminal_resize");
 
   static wint_t keyAutoCompose = UiKeyConfig::GetKey("auto_compose");
+  static wint_t keyFocusAsk = UiKeyConfig::GetKey("focus_ask");
   static wint_t keySelectMention = UiKeyConfig::GetKey("select_mention");
 
   if (p_Key == keyTerminalResize)
@@ -5218,6 +5219,11 @@ void UiModel::KeyHandler(wint_t p_Key)
   else if (p_Key == keySelectMention)
   {
     OnKeySelectMention();
+  }
+  else if (p_Key == keyFocusAsk)
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    GetImpl().ToggleAskFocus();
   }
   else if (p_Key == keyAutoCompose)
   {
