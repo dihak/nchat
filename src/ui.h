@@ -1,6 +1,6 @@
 // ui.h
 //
-// Copyright (c) 2019-2025 Kristofer Berggren
+// Copyright (c) 2019-2026 Kristofer Berggren
 // All rights reserved.
 //
 // nchat is distributed under the MIT license, see LICENSE for details.
@@ -14,6 +14,7 @@
 class Protocol;
 class ServiceMessage;
 class UiController;
+class UiControlSocket;
 class UiModel;
 
 class Ui
@@ -35,5 +36,6 @@ public:
 private:
   std::shared_ptr<UiModel> m_Model;
   std::shared_ptr<UiController> m_Controller;
+  std::shared_ptr<UiControlSocket> m_ControlSocket;
   std::string m_TerminalTitle;
 };

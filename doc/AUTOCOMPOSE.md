@@ -72,3 +72,14 @@ Example usage with custom prompt and max token limit of 100:
 
     auto_compose_command=python3 ~/.local/bin/compose -p "Suggest {your_name}'s next reply in a joking manner." -M 100 -c '%1'
 
+Example usage with xAI Grok (`utils/nchat-compose-grok`, requires `XAI_API_KEY`):
+
+    auto_compose_command=python3 ~/.local/bin/nchat-compose-grok -c '%1'
+
+Optional model override (default `grok-4`) and 60s timeout built-in:
+
+    auto_compose_command=python3 ~/.local/bin/nchat-compose-grok -m grok-4 -c '%1'
+
+If `XAI_API_KEY` is unset, `nchat-compose-grok` exits non-zero with a message on
+stderr and prints nothing on stdout (so the TUI does not insert junk).
+

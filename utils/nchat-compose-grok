@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+# nchat-compose-grok — xAI Grok auto-compose for nchat
+#
+# Copyright (c) 2026 Kristofer Berggren
+# All rights reserved.
+#
+# nchat is distributed under the MIT license, see LICENSE for details.
+
+"""Suggest next reply via xAI OpenAI-compatible chat completions API."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+
+API_URL = "https://api.x.ai/v1/chat/completions"
+DEFAULT_MODEL = "grok-4"
+DEFAULT_TIMEOUT = 60
+
+
+def read_chat_file(path: str) -> list[str]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return [line.rstrip("\n") for line in f]
+    except FileNotFoundError:
+        print(f"Error: File '{path}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+
+def parse_chat(lines: list[str]) -> tuple[str, list[dict]]:
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    if not lines or ":" not in lines[-1]:
+        print("Error: Last line must be 'YourName:'", file=sys.stderr)
+        sys.exit(1)
+
+    last_sender, last_rest = lines[-1].split(":", 1)
+    if last_rest.strip():
+        print(
+            "Error: Last line must end with a colon and no message (e.g., 'Stanley:')",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    your_name = last_sender.strip()
+    if not your_name:
+        print("Error: Empty name on last line.", file=sys.stderr)
+        sys.exit(1)
+
+    messages = []
+    for ln in lines[:-1]:
+        if not ln.strip() or ":" not in ln:
+            continue
+        sender, content = ln.split(":", 1)
+        sender = sender.strip()
+        content = content.lstrip()
+        role = "assistant" if sender == your_name else "user"
+        messages.append({"role": role, "content": f"{sender}: {content}"})
+
+    if not messages:
+        print(
+            "Error: No valid 'Name: message' lines before the final 'YourName:' marker.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return your_name, messages
+
+
+def build_payload(model: str, your_name: str, chat_messages: list[dict]) -> dict:
+    prompt = f"Suggest {your_name}'s next reply."
+    system_msg = {
+        "role": "system",
+        "content": f"You are {your_name} in a chat. " + prompt,
+    }
+    final_instruction = {"role": "user", "content": prompt}
+    return {
+        "model": model,
+        "messages": [system_msg] + chat_messages + [final_instruction],
+    }
+
+
+def send_request(payload: dict, api_key: str, timeout: int) -> str:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    req = urllib.request.Request(
+        API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+            result = json.loads(body)
+    except urllib.error.HTTPError as e:
+        try:
+            err_json = json.loads(e.read().decode("utf-8"))
+            msg = err_json.get("error", {}).get("message") or str(err_json)
+        except Exception:
+            msg = f"{e.code} {e.reason}"
+        print(f"HTTP Error: {msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"URL Error: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print("Error: Response was not valid JSON.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        return result["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        print("Error: Unexpected response structure.", file=sys.stderr)
+        sys.exit(1)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="nchat auto-compose via xAI Grok (XAI_API_KEY)."
+    )
+    parser.add_argument(
+        "-c",
+        "--chat-completion",
+        required=True,
+        help="Path to input chat file. Last line must be 'YourName:'.",
+    )
+    parser.add_argument(
+        "-m",
+        "--model",
+        default=DEFAULT_MODEL,
+        help=f"Model name (default: {DEFAULT_MODEL}).",
+    )
+    parser.add_argument(
+        "-T",
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help=f"Network timeout seconds (default: {DEFAULT_TIMEOUT}).",
+    )
+    args = parser.parse_args()
+
+    api_key = os.environ.get("XAI_API_KEY")
+    if not api_key:
+        print("Error: Please set the XAI_API_KEY environment variable.", file=sys.stderr)
+        sys.exit(1)
+
+    if args.timeout <= 0:
+        print("Error: -T / --timeout must be > 0 seconds.", file=sys.stderr)
+        sys.exit(1)
+
+    lines = read_chat_file(args.chat_completion)
+    your_name, chat_messages = parse_chat(lines)
+    payload = build_payload(args.model, your_name, chat_messages)
+    reply = send_request(payload, api_key, timeout=args.timeout)
+    reply_without_name = reply.split(":", 1)[1].strip() if ":" in reply else reply
+    print(reply_without_name)
+
+
+if __name__ == "__main__":
+    main()

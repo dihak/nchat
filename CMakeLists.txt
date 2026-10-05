@@ -413,9 +413,11 @@ add_executable(nchat
   src/uicontactlistdialog.cpp
   src/uicontactlistdialog.h
   src/uicontroller.cpp
+  src/uicontroller.h
+  src/uicontrolsocket.cpp
+  src/uicontrolsocket.h
   src/uigroupmemberlistdialog.cpp
   src/uigroupmemberlistdialog.h
-  src/uicontroller.h
   src/uidialog.cpp
   src/uidialog.h
   src/uiemojilistdialog.cpp
@@ -648,6 +650,13 @@ endif()
 
 # Manual
 install(FILES src/nchat.1 DESTINATION "${CMAKE_INSTALL_MANDIR}/man1")
+
+# Agent control utilities (Python, stdlib only)
+install(PROGRAMS
+  utils/nchat-ctl
+  utils/nchat_mcp.py
+  utils/nchat-compose-grok
+  DESTINATION bin)
 
 # Uninstall
 if(HAS_SHARED_LIBS)

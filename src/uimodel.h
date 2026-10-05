@@ -193,6 +193,16 @@ private:
     void HandleProtocolUiControlEnd();
     bool AutoCompose();
 
+    // Agent control helpers (caller holds model mutex; may unlock while waiting)
+    std::string AgentControl(const std::string& p_RequestLine, std::unique_lock<owned_mutex>& p_Lock);
+    std::string AgentChats();
+    std::string AgentHistory(const std::string& p_ChatId, int p_Limit, std::unique_lock<owned_mutex>& p_Lock,
+                             std::string& p_Error);
+    std::string AgentSend(const std::string& p_ChatId, const std::string& p_Text, const std::string& p_ReplyTo);
+    std::string AgentSendFile(const std::string& p_ChatId, const std::string& p_Path);
+    bool FindChat(const std::string& p_ChatId, std::string& p_ProfileId) const;
+    void RestoreCurrentChat(const std::pair<std::string, std::string>& p_Previous);
+
     static bool IsAttachmentDownloaded(const FileInfo& p_FileInfo);
     static bool IsAttachmentDownloadable(const FileInfo& p_FileInfo, bool p_AllowRetryFailed = false);
     static void SanitizeEntryStr(std::string& p_Str);
@@ -341,6 +351,9 @@ public:
   void SetFileListDialogActive(bool p_FileListDialogActive);
   void SetStatusOnline(const std::string& p_ProfileId, bool p_IsOnline);
   void SetTerminalActive(bool p_TerminalActive);
+
+  // Agent control socket (UI thread only). One newline-delimited JSON request -> response.
+  std::string AgentControl(const std::string& p_RequestLine);
 
   // Locked methods require caller to hold model mutex (intended for Ui*View classes)
   bool GetChatIsUnreadLocked(const std::string& p_ProfileId, const std::string& p_ChatId);

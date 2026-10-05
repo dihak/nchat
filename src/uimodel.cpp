@@ -8,9 +8,13 @@
 #include "uimodel.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <sstream>
 
 #include <ncurses.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "appconfig.h"
@@ -5814,4 +5818,466 @@ bool UiModel::IsAttachmentDownloaded(const FileInfo& p_FileInfo)
 bool UiModel::IsAttachmentDownloadable(const FileInfo& p_FileInfo, bool p_AllowRetryFailed)
 {
   return UiModel::Impl::IsAttachmentDownloadable(p_FileInfo, p_AllowRetryFailed);
+}
+
+std::string UiModel::AgentControl(const std::string& p_RequestLine)
+{
+  std::unique_lock<owned_mutex> lock(m_ModelMutex);
+  return GetImpl().AgentControl(p_RequestLine, lock);
+}
+
+namespace
+{
+  std::string AgentJsonEscape(const std::string& p_Str)
+  {
+    std::string result;
+    result.reserve(p_Str.size() + 8);
+    for (unsigned char c : p_Str)
+    {
+      switch (c)
+      {
+        case '"': result += "\\\""; break;
+        case '\\': result += "\\\\"; break;
+        case '\n': result += "\\n"; break;
+        case '\r': result += "\\r"; break;
+        case '\t': result += "\\t"; break;
+        default:
+          if (c < 0x20)
+          {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "\\u%04x", c);
+            result += buf;
+          }
+          else
+          {
+            result += static_cast<char>(c);
+          }
+          break;
+      }
+    }
+    return result;
+  }
+
+  std::string AgentJsonUnescape(const std::string& p_Str)
+  {
+    std::string result;
+    result.reserve(p_Str.size());
+    for (size_t i = 0; i < p_Str.size(); ++i)
+    {
+      if ((p_Str[i] == '\\') && ((i + 1) < p_Str.size()))
+      {
+        switch (p_Str[i + 1])
+        {
+          case '"': result += '"'; ++i; break;
+          case '\\': result += '\\'; ++i; break;
+          case 'n': result += '\n'; ++i; break;
+          case 'r': result += '\r'; ++i; break;
+          case 't': result += '\t'; ++i; break;
+          case 'u':
+            if ((i + 5) < p_Str.size())
+            {
+              // Minimal \\u00XX support for control chars we emit.
+              result += p_Str[i];
+            }
+            else
+            {
+              result += p_Str[i];
+            }
+            break;
+          default: result += p_Str[i]; break;
+        }
+      }
+      else
+      {
+        result += p_Str[i];
+      }
+    }
+    return result;
+  }
+
+  bool AgentExtractString(const std::string& p_Json, const std::string& p_Key, std::string& p_Out)
+  {
+    const std::string searchKey = "\"" + p_Key + "\"";
+    size_t keyPos = p_Json.find(searchKey);
+    if (keyPos == std::string::npos) return false;
+    size_t colonPos = p_Json.find(':', keyPos + searchKey.size());
+    if (colonPos == std::string::npos) return false;
+    size_t i = colonPos + 1;
+    while ((i < p_Json.size()) && ((p_Json[i] == ' ') || (p_Json[i] == '\t'))) ++i;
+    if ((i >= p_Json.size()) || (p_Json[i] != '"')) return false;
+    size_t start = i + 1;
+    size_t end = start;
+    while (end < p_Json.size())
+    {
+      if (p_Json[end] == '\\') { end += 2; continue; }
+      if (p_Json[end] == '"') break;
+      ++end;
+    }
+    if (end >= p_Json.size()) return false;
+    p_Out = AgentJsonUnescape(p_Json.substr(start, end - start));
+    return true;
+  }
+
+  bool AgentExtractInt(const std::string& p_Json, const std::string& p_Key, int& p_Out)
+  {
+    const std::string searchKey = "\"" + p_Key + "\"";
+    size_t keyPos = p_Json.find(searchKey);
+    if (keyPos == std::string::npos) return false;
+    size_t colonPos = p_Json.find(':', keyPos + searchKey.size());
+    if (colonPos == std::string::npos) return false;
+    size_t i = colonPos + 1;
+    while ((i < p_Json.size()) && ((p_Json[i] == ' ') || (p_Json[i] == '\t'))) ++i;
+    if (i >= p_Json.size()) return false;
+    if ((p_Json[i] == '"') || (p_Json[i] == '{') || (p_Json[i] == '[')) return false;
+    size_t end = i;
+    if ((p_Json[end] == '-') || (p_Json[end] == '+')) ++end;
+    if ((end >= p_Json.size()) || !std::isdigit(static_cast<unsigned char>(p_Json[end]))) return false;
+    while ((end < p_Json.size()) && std::isdigit(static_cast<unsigned char>(p_Json[end]))) ++end;
+    try
+    {
+      p_Out = std::stoi(p_Json.substr(i, end - i));
+    }
+    catch (...)
+    {
+      return false;
+    }
+    return true;
+  }
+
+  std::string AgentOk(const std::string& p_Id, const std::string& p_ResultObject)
+  {
+    return "{\"id\":\"" + AgentJsonEscape(p_Id) + "\",\"ok\":true,\"result\":" + p_ResultObject + "}";
+  }
+
+  std::string AgentErr(const std::string& p_Id, const std::string& p_Error)
+  {
+    return "{\"id\":\"" + AgentJsonEscape(p_Id) + "\",\"ok\":false,\"error\":\"" + AgentJsonEscape(p_Error) + "\"}";
+  }
+}
+
+std::string UiModel::Impl::AgentControl(const std::string& p_RequestLine, std::unique_lock<owned_mutex>& p_Lock)
+{
+  std::string id;
+  if (!AgentExtractString(p_RequestLine, "id", id))
+  {
+    id.clear();
+  }
+
+  // Require a top-level JSON object with a method string.
+  size_t first = p_RequestLine.find_first_not_of(" \t\r\n");
+  if ((first == std::string::npos) || (p_RequestLine[first] != '{'))
+  {
+    return AgentErr(id, "malformed JSON");
+  }
+
+  std::string method;
+  if (!AgentExtractString(p_RequestLine, "method", method))
+  {
+    return AgentErr(id, "malformed JSON: missing method");
+  }
+
+  std::string params;
+  {
+    const std::string key = "\"params\"";
+    size_t keyPos = p_RequestLine.find(key);
+    if (keyPos != std::string::npos)
+    {
+      size_t colonPos = p_RequestLine.find(':', keyPos + key.size());
+      if (colonPos != std::string::npos)
+      {
+        size_t i = colonPos + 1;
+        while ((i < p_RequestLine.size()) && ((p_RequestLine[i] == ' ') || (p_RequestLine[i] == '\t'))) ++i;
+        if ((i < p_RequestLine.size()) && (p_RequestLine[i] == '{'))
+        {
+          int depth = 0;
+          size_t j = i;
+          bool inStr = false;
+          bool esc = false;
+          for (; j < p_RequestLine.size(); ++j)
+          {
+            char c = p_RequestLine[j];
+            if (inStr)
+            {
+              if (esc) { esc = false; continue; }
+              if (c == '\\') { esc = true; continue; }
+              if (c == '"') inStr = false;
+              continue;
+            }
+            if (c == '"') { inStr = true; continue; }
+            if (c == '{') ++depth;
+            else if (c == '}')
+            {
+              --depth;
+              if (depth == 0)
+              {
+                params = p_RequestLine.substr(i, j - i + 1);
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  if (params.empty()) params = "{}";
+
+  if (method == "chats")
+  {
+    return AgentOk(id, AgentChats());
+  }
+  if (method == "history")
+  {
+    std::string chatId;
+    if (!AgentExtractString(params, "chat", chatId) || chatId.empty())
+    {
+      return AgentErr(id, "missing params.chat");
+    }
+    int limit = 30;
+    int extracted = 0;
+    if (AgentExtractInt(params, "limit", extracted))
+    {
+      limit = extracted;
+    }
+    if (limit < 1) limit = 1;
+    if (limit > 100) limit = 100;
+    std::string err;
+    std::string result = AgentHistory(chatId, limit, p_Lock, err);
+    if (!err.empty()) return AgentErr(id, err);
+    return AgentOk(id, result);
+  }
+  if (method == "send")
+  {
+    std::string chatId;
+    std::string text;
+    std::string replyTo;
+    if (!AgentExtractString(params, "chat", chatId) || chatId.empty())
+    {
+      return AgentErr(id, "missing params.chat");
+    }
+    if (!AgentExtractString(params, "text", text))
+    {
+      return AgentErr(id, "missing params.text");
+    }
+    if (text.empty())
+    {
+      return AgentErr(id, "empty text");
+    }
+    AgentExtractString(params, "replyTo", replyTo);
+    std::string err = AgentSend(chatId, text, replyTo);
+    if (!err.empty()) return AgentErr(id, err);
+    return AgentOk(id, "{\"sent\":true}");
+  }
+  if (method == "send_file")
+  {
+    std::string chatId;
+    std::string path;
+    if (!AgentExtractString(params, "chat", chatId) || chatId.empty())
+    {
+      return AgentErr(id, "missing params.chat");
+    }
+    if (!AgentExtractString(params, "path", path) || path.empty())
+    {
+      return AgentErr(id, "missing params.path");
+    }
+    std::string err = AgentSendFile(chatId, path);
+    if (!err.empty()) return AgentErr(id, err);
+    return AgentOk(id, "{\"sent\":true}");
+  }
+
+  return AgentErr(id, "unknown method: " + method);
+}
+
+std::string UiModel::Impl::AgentChats()
+{
+  std::ostringstream ss;
+  ss << "{\"chats\":[";
+  bool first = true;
+  for (const auto& chat : m_ChatVec)
+  {
+    const std::string& profileId = chat.first;
+    const std::string& chatId = chat.second;
+    ChatInfo info;
+    auto pit = m_ChatInfos.find(profileId);
+    if (pit != m_ChatInfos.end())
+    {
+      auto cit = pit->second.find(chatId);
+      if (cit != pit->second.end()) info = cit->second;
+    }
+    const std::string title = GetContactName(profileId, chatId);
+    if (!first) ss << ",";
+    first = false;
+    ss << "{\"id\":\"" << AgentJsonEscape(chatId) << "\""
+       << ",\"title\":\"" << AgentJsonEscape(title) << "\""
+       << ",\"unread\":" << (info.isUnread ? "true" : "false")
+       << ",\"muted\":" << (info.isMuted ? "true" : "false")
+       << ",\"pinned\":" << (info.isPinned ? "true" : "false")
+       << ",\"lastMessageTime\":" << info.lastMessageTime
+       << "}";
+  }
+  ss << "]}";
+  return ss.str();
+}
+
+std::string UiModel::Impl::AgentHistory(const std::string& p_ChatId, int p_Limit,
+                                       std::unique_lock<owned_mutex>& p_Lock, std::string& p_Error)
+{
+  p_Error.clear();
+  std::string profileId;
+  if (!FindChat(p_ChatId, profileId))
+  {
+    p_Error = "chat not found";
+    return std::string();
+  }
+
+  // Fetch more via protocol if the in-memory cache is short. Do not mark read and do not
+  // permanently change the selected chat (GetMessagesRequest is by chat id).
+  if (static_cast<int>(m_MessageVec[profileId][p_ChatId].size()) < p_Limit)
+  {
+    std::shared_ptr<GetMessagesRequest> getMessagesRequest = std::make_shared<GetMessagesRequest>();
+    getMessagesRequest->chatId = p_ChatId;
+    getMessagesRequest->fromMsgId = GetLastMessageId(profileId, p_ChatId);
+    getMessagesRequest->limit = p_Limit;
+    SendProtocolRequest(profileId, getMessagesRequest);
+
+    // Wait for protocol/cache fill without holding the model mutex (MessageHandler needs it).
+    const int maxIters = 30 * 20; // ~30s at 50ms
+    int lastSize = static_cast<int>(m_MessageVec[profileId][p_ChatId].size());
+    int stable = 0;
+    for (int i = 0; i < maxIters; ++i)
+    {
+      if (static_cast<int>(m_MessageVec[profileId][p_ChatId].size()) >= p_Limit) break;
+      p_Lock.unlock();
+      TimeUtil::Sleep(0.050);
+      p_Lock.lock();
+      const int size = static_cast<int>(m_MessageVec[profileId][p_ChatId].size());
+      if (size == lastSize)
+      {
+        if ((size > 0) && (++stable > 10)) break; // ~0.5s with no growth after some data
+      }
+      else
+      {
+        lastSize = size;
+        stable = 0;
+      }
+    }
+  }
+
+  auto& messages = m_Messages[profileId][p_ChatId];
+  auto& messageVec = m_MessageVec[profileId][p_ChatId];
+
+  // messageVec is newest-first; take the newest p_Limit and emit oldest-first.
+  const int total = static_cast<int>(messageVec.size());
+  const int count = std::min(p_Limit, total);
+  std::ostringstream ss;
+  ss << "{\"messages\":[";
+  bool first = true;
+  for (int i = count - 1; i >= 0; --i)
+  {
+    const std::string& msgId = messageVec[static_cast<size_t>(i)];
+    auto mit = messages.find(msgId);
+    if (mit == messages.end()) continue;
+    const ChatMessage& msg = mit->second;
+    if (!first) ss << ",";
+    first = false;
+    ss << "{\"id\":\"" << AgentJsonEscape(msg.id) << "\""
+       << ",\"senderId\":\"" << AgentJsonEscape(msg.senderId) << "\""
+       << ",\"text\":\"" << AgentJsonEscape(msg.text) << "\""
+       << ",\"timeSent\":" << msg.timeSent
+       << ",\"isOutgoing\":" << (msg.isOutgoing ? "true" : "false")
+       << ",\"quotedId\":\"" << AgentJsonEscape(msg.quotedId) << "\""
+       << "}";
+  }
+  ss << "]}";
+  return ss.str();
+}
+
+std::string UiModel::Impl::AgentSend(const std::string& p_ChatId, const std::string& p_Text,
+                                    const std::string& p_ReplyTo)
+{
+  std::string profileId;
+  if (!FindChat(p_ChatId, profileId))
+  {
+    return "chat not found";
+  }
+
+  std::shared_ptr<SendMessageRequest> sendMessageRequest = std::make_shared<SendMessageRequest>();
+  sendMessageRequest->chatId = p_ChatId;
+  sendMessageRequest->chatMessage.text = p_Text;
+  sendMessageRequest->chatMessage.mentions = ParseMentions(profileId, p_ChatId, p_Text);
+
+  if (!p_ReplyTo.empty())
+  {
+    sendMessageRequest->chatMessage.quotedId = p_ReplyTo;
+    auto mit = m_Messages[profileId][p_ChatId].find(p_ReplyTo);
+    if (mit != m_Messages[profileId][p_ChatId].end())
+    {
+      sendMessageRequest->chatMessage.quotedText = mit->second.text;
+      sendMessageRequest->chatMessage.quotedSender = mit->second.senderId;
+    }
+  }
+
+  // Send by id; do not change the user's selected chat.
+  SendProtocolRequest(profileId, sendMessageRequest);
+  return std::string();
+}
+
+std::string UiModel::Impl::AgentSendFile(const std::string& p_ChatId, const std::string& p_Path)
+{
+  std::string profileId;
+  if (!FindChat(p_ChatId, profileId))
+  {
+    return "chat not found";
+  }
+
+  const std::string path = FileUtil::ExpandPath(p_Path);
+  struct stat st;
+  if (stat(path.c_str(), &st) != 0)
+  {
+    return "path does not exist";
+  }
+  if (!S_ISREG(st.st_mode))
+  {
+    return "path is not a regular file";
+  }
+
+  FileInfo fileInfo;
+  fileInfo.filePath = path;
+  fileInfo.fileType = FileUtil::GetMimeType(path);
+
+  std::shared_ptr<SendMessageRequest> sendMessageRequest = std::make_shared<SendMessageRequest>();
+  sendMessageRequest->chatId = p_ChatId;
+  sendMessageRequest->chatMessage.fileInfo = ProtocolUtil::FileInfoToHex(fileInfo);
+
+  // Send by id; do not change the user's selected chat.
+  SendProtocolRequest(profileId, sendMessageRequest);
+  return std::string();
+}
+
+bool UiModel::Impl::FindChat(const std::string& p_ChatId, std::string& p_ProfileId) const
+{
+  for (const auto& chat : m_ChatVec)
+  {
+    if (chat.second == p_ChatId)
+    {
+      p_ProfileId = chat.first;
+      return true;
+    }
+  }
+  return false;
+}
+
+void UiModel::Impl::RestoreCurrentChat(const std::pair<std::string, std::string>& p_Previous)
+{
+  if (p_Previous == s_ChatNone) return;
+  if (m_CurrentChat == p_Previous) return;
+  for (size_t i = 0; i < m_ChatVec.size(); ++i)
+  {
+    if (m_ChatVec.at(i) == p_Previous)
+    {
+      m_CurrentChatIndex = static_cast<int>(i);
+      m_CurrentChat = p_Previous;
+      OnCurrentChatChanged();
+      return;
+    }
+  }
 }
