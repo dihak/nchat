@@ -106,3 +106,7 @@ Config path: `-f PATH`, or env `NCHAT_COMPOSE_CONFIG`.
 If the config or API key is missing, or the request fails, the script exits
 non-zero with a message on stderr and prints nothing on stdout.
 
+While the command runs, the status bar shows `composing...`. Press the
+auto-compose key again, or the cancel key, to abort it. The draft is written
+into the input box only after the command exits successfully.
+

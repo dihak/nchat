@@ -12,6 +12,11 @@
 #include <cstdio>
 #include <sstream>
 
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
+
 #include <ncurses.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -58,6 +63,14 @@ UiModel::Impl::Impl(UiModel* p_UiModel)
 
 UiModel::Impl::~Impl()
 {
+  if (m_Compose)
+  {
+    CancelAutoCompose();
+    if (m_Compose->thread.joinable())
+    {
+      m_Compose->thread.join();
+    }
+  }
 }
 
 void UiModel::Impl::Init()
@@ -2437,6 +2450,7 @@ bool UiModel::Impl::Process()
   }
 
   ProcessTimers();
+  PollAutoCompose();
 
   SetTyping("", "", false);
   m_View->Draw();
@@ -2452,6 +2466,12 @@ void UiModel::Impl::ProcessTimers()
   if (elapsedMs > 200)
   {
     lastTimeMs = nowTimeMs;
+
+    if (m_Compose && m_Compose->running.load() && !m_Compose->cancel.load())
+    {
+      m_Compose->dots = (m_Compose->dots % 3) + 1;
+      UpdateStatus();
+    }
 
     static const int autoSelectChatTimeoutSec = UiConfig::GetNum("auto_select_chat_timeout_sec");
     if (!IsCurrentChatSet() && (autoSelectChatTimeoutSec != 0) && (m_LastSyncMessageTime != 0))
@@ -2827,6 +2847,20 @@ std::string UiModel::Impl::GetChatStatus(const std::string& p_ProfileId, const s
     else
     {
       chatStatus = chatStatus + ", pinned";
+    }
+  }
+
+  if (m_Compose && m_Compose->running.load())
+  {
+    const std::string label = m_Compose->cancel.load() ? "cancelling" : "composing";
+    const std::string extra = label + std::string((size_t)m_Compose->dots, '.');
+    if (chatStatus.empty())
+    {
+      chatStatus = extra;
+    }
+    else
+    {
+      chatStatus = chatStatus + ", " + extra;
     }
   }
 
@@ -3729,6 +3763,11 @@ void UiModel::Impl::SaveEditMessage()
 
 void UiModel::Impl::OnKeyCancel()
 {
+  if (CancelAutoCompose())
+  {
+    return;
+  }
+
   AnyUserKeyInput();
   bool editMessageActive = GetEditMessageActive();
   bool allowUndo = !editMessageActive;
@@ -4421,6 +4460,75 @@ void UiModel::Impl::Draw()
   m_View->Draw();
 }
 
+static int RunComposeCommand(const std::string& p_Cmd, const std::string& p_StdoutPath,
+                              const std::string& p_StderrPath, std::atomic<bool>& p_Cancel,
+                              std::atomic<int>& p_Pid, int& p_Status)
+{
+  p_Status = -1;
+  const pid_t pid = fork();
+  if (pid < 0)
+  {
+    return -1;
+  }
+
+  if (pid == 0)
+  {
+    setpgid(0, 0);
+    const int outFd = open(p_StdoutPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    const int errFd = open(p_StderrPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (outFd >= 0)
+    {
+      dup2(outFd, STDOUT_FILENO);
+    }
+    if (errFd >= 0)
+    {
+      dup2(errFd, STDERR_FILENO);
+    }
+    if (outFd > 2) close(outFd);
+    if (errFd > 2) close(errFd);
+    execl("/bin/sh", "sh", "-c", p_Cmd.c_str(), (char*)nullptr);
+    _exit(127);
+  }
+
+  setpgid(pid, pid);
+  p_Pid.store((int)pid);
+
+  int killWaits = 0;
+  while (true)
+  {
+    const pid_t waited = waitpid(pid, &p_Status, WNOHANG);
+    if (waited == pid)
+    {
+      break;
+    }
+    if (waited < 0)
+    {
+      if (errno == EINTR)
+      {
+        continue;
+      }
+      break;
+    }
+
+    if (p_Cancel.load())
+    {
+      if (killWaits == 0)
+      {
+        kill(-pid, SIGTERM);
+      }
+      else if (killWaits > 6)
+      {
+        kill(-pid, SIGKILL);
+      }
+      ++killWaits;
+    }
+    usleep(50000);
+  }
+
+  p_Pid.store(-1);
+  return 0;
+}
+
 bool UiModel::Impl::AutoCompose()
 {
   AnyUserKeyInput();
@@ -4498,26 +4606,160 @@ bool UiModel::Impl::AutoCompose()
     cmd = "python3 '" + scriptPath + "' -c '%1'";
   }
 
-  std::string str;
   StrUtil::ReplaceString(cmd, "%1", tempPath);
-  const bool rv = RunCommand(cmd, &str);
-  if (rv)
+
+  PollAutoCompose();
+  if (!m_Compose)
   {
-    int& entryPos = m_EntryPos[profileId][chatId];
-    std::wstring& entryStr = m_EntryStr[profileId][chatId];
-
-    if (!m_View->GetEmojiEnabled())
-    {
-      str = StrUtil::Textize(str);
-    }
-
-    entryStr = StrUtil::ToWString(str);
-    entryPos = (int)entryStr.size();
+    m_Compose = std::make_unique<ComposeState>();
+  }
+  if (m_Compose->thread.joinable())
+  {
+    m_Compose->thread.join();
   }
 
-  FileUtil::RmFile(tempPath);
+  m_Compose->cancel.store(false);
+  m_Compose->pid.store(-1);
+  m_Compose->running.store(true);
+  m_Compose->dots = 1;
+  {
+    std::lock_guard<std::mutex> lock(m_Compose->mu);
+    m_Compose->pending = false;
+    m_Compose->ok = false;
+    m_Compose->cancelled = false;
+    m_Compose->result.clear();
+    m_Compose->error.clear();
+    m_Compose->profileId = profileId;
+    m_Compose->chatId = chatId;
+  }
+  UpdateStatus();
+
+  const std::string stdoutPath = FileUtil::GetTempDir() + "/compose-stdout.txt";
+  const std::string stderrPath = FileUtil::GetTempDir() + "/compose-stderr.txt";
+  m_Compose->thread = std::thread([this, cmd, tempPath, stdoutPath, stderrPath]()
+  {
+    int status = -1;
+    const int spawnRv = RunComposeCommand(cmd, stdoutPath, stderrPath, m_Compose->cancel, m_Compose->pid, status);
+    const bool cancelled = m_Compose->cancel.load();
+    const bool ok = (!cancelled && (spawnRv == 0) && (status >= 0) && WIFEXITED(status) && (WEXITSTATUS(status) == 0));
+
+    std::string result;
+    if (ok && FileUtil::Exists(stdoutPath))
+    {
+      result = FileUtil::ReadFile(stdoutPath);
+      if (!result.empty() && (result.back() == '\n'))
+      {
+        result.pop_back();
+      }
+    }
+
+    if (FileUtil::Exists(stderrPath))
+    {
+      const std::string stderrStr = FileUtil::ReadFile(stderrPath);
+      if (!stderrStr.empty())
+      {
+        LOG_WARNING("auto-compose stderr:");
+        Log::Dump(stderrStr.c_str());
+      }
+    }
+    FileUtil::RmFile(stdoutPath);
+    FileUtil::RmFile(stderrPath);
+    FileUtil::RmFile(tempPath);
+
+    {
+      std::lock_guard<std::mutex> lock(m_Compose->mu);
+      m_Compose->ok = ok;
+      m_Compose->cancelled = cancelled;
+      m_Compose->result = result;
+      m_Compose->error = ok ? std::string() : (cancelled ? std::string() : std::string("Auto-compose failed."));
+      m_Compose->pending = true;
+    }
+    m_Compose->running.store(false);
+  });
+
+  return true;
+}
+
+bool UiModel::Impl::CancelAutoCompose()
+{
+  if (!m_Compose || !m_Compose->running.load())
+  {
+    return false;
+  }
+
+  m_Compose->cancel.store(true);
+  const int pid = m_Compose->pid.load();
+  if (pid > 0)
+  {
+    kill(-pid, SIGTERM);
+  }
+  UpdateStatus();
+  return true;
+}
+
+void UiModel::Impl::PollAutoCompose()
+{
+  if (!m_Compose)
+  {
+    return;
+  }
+
+  if (m_Compose->running.load())
+  {
+    return;
+  }
+
+  std::string result;
+  std::string profileId;
+  std::string chatId;
+  std::string error;
+  bool pending = false;
+  bool ok = false;
+  bool cancelled = false;
+  {
+    std::lock_guard<std::mutex> lock(m_Compose->mu);
+    if (!m_Compose->pending)
+    {
+      return;
+    }
+    m_Compose->pending = false;
+    pending = true;
+    ok = m_Compose->ok;
+    cancelled = m_Compose->cancelled;
+    result = std::move(m_Compose->result);
+    error = std::move(m_Compose->error);
+    profileId = m_Compose->profileId;
+    chatId = m_Compose->chatId;
+  }
+
+  if (!pending)
+  {
+    return;
+  }
+
+  if (cancelled || !ok)
+  {
+    m_ComposeError = cancelled ? std::string() : (error.empty() ? std::string("Auto-compose failed.") : error);
+    UpdateStatus();
+    return;
+  }
+
+  if (!m_View->GetEmojiEnabled())
+  {
+    result = StrUtil::Textize(result);
+  }
+
+  m_EntryStr[profileId][chatId] = StrUtil::ToWString(result);
+  m_EntryPos[profileId][chatId] = (int)m_EntryStr[profileId][chatId].size();
   UpdateEntry();
-  return rv;
+  UpdateStatus();
+}
+
+std::string UiModel::Impl::TakeComposeError()
+{
+  std::string error;
+  error.swap(m_ComposeError);
+  return error;
 }
 
 // ---------------------------------------------------------------------
@@ -4879,22 +5121,34 @@ void UiModel::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMessage)
 
 bool UiModel::Process()
 {
-  std::unique_lock<owned_mutex> lock(m_ModelMutex);
-  if (GetImpl().IsProtocolUiControlActive())
+  std::string composeError;
+  bool rv = true;
   {
-    GetImpl().HandleProtocolUiControlStart();
-
-    while (GetImpl().IsProtocolUiControlActive())
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    if (GetImpl().IsProtocolUiControlActive())
     {
-      lock.unlock();
-      TimeUtil::Sleep(0.050); // match GetKey timeout
-      lock.lock();
+      GetImpl().HandleProtocolUiControlStart();
+
+      while (GetImpl().IsProtocolUiControlActive())
+      {
+        lock.unlock();
+        TimeUtil::Sleep(0.050); // match GetKey timeout
+        lock.lock();
+      }
+
+      GetImpl().HandleProtocolUiControlEnd();
     }
 
-    GetImpl().HandleProtocolUiControlEnd();
+    rv = GetImpl().Process();
+    composeError = GetImpl().TakeComposeError();
   }
 
-  return GetImpl().Process();
+  if (!composeError.empty())
+  {
+    MessageDialog("Warning", composeError, 0.7, 5);
+  }
+
+  return rv;
 }
 
 void UiModel::RequestContacts()
@@ -5749,6 +6003,10 @@ void UiModel::OnKeyAutoCompose()
   bool rv = false;
   {
     std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    if (GetImpl().CancelAutoCompose())
+    {
+      return;
+    }
     rv = GetImpl().AutoCompose();
   }
 

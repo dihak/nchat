@@ -7,10 +7,13 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <stack>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -192,6 +195,9 @@ private:
     void HandleProtocolUiControlStart();
     void HandleProtocolUiControlEnd();
     bool AutoCompose();
+    bool CancelAutoCompose();
+    void PollAutoCompose();
+    std::string TakeComposeError();
 
     // Agent control helpers (caller holds model mutex; may unlock while waiting)
     std::string AgentControl(const std::string& p_RequestLine, std::unique_lock<owned_mutex>& p_Lock);
@@ -308,6 +314,26 @@ private:
     bool m_HistoryInteraction = false;
 
     int m_HelpOffset = 0;
+
+    // Async auto-compose. The worker must not touch ncurses or the model mutex.
+    struct ComposeState
+    {
+      std::thread thread;
+      std::atomic<bool> running{false};
+      std::atomic<bool> cancel{false};
+      std::atomic<int> pid{-1};
+      std::mutex mu;
+      bool pending = false;
+      bool ok = false;
+      bool cancelled = false;
+      std::string result;
+      std::string error;
+      std::string profileId;
+      std::string chatId;
+      int dots = 1;
+    };
+    std::unique_ptr<ComposeState> m_Compose;
+    std::string m_ComposeError;
   };
 
 public:
