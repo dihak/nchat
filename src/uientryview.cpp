@@ -65,7 +65,7 @@ void UiEntryView::Draw()
 
   if (showAsk)
   {
-    const std::wstring prefix = L"ask: ";
+    const std::wstring prefix = L"ai: ";
     std::wstring ask = m_Model->GetAskStrLocked();
     const int askPos = m_Model->GetAskPosLocked();
     const int avail = std::max(1, m_W - (int)prefix.size());
